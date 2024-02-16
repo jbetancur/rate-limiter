@@ -1,0 +1,13 @@
+{
+    "C_Cpp.errorSquiggles": "disabled",
+    "files.associations": {
+        "bpf.h": "c",
+        "types.h": "c",
+        "udp.h": "c",
+        "if_ether.h": "c",
+        "ip.h": "c",
+        "tcp.h": "c",
+        "stdlib.h": "c",
+        "bpf_helpers.h": "c"
+    }
+}
