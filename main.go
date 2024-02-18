@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -22,7 +22,7 @@ var (
 			Name: "packet_counter",
 			Help: "Total number of packets by ip",
 		},
-		[]string{"source_ip", "interface", "timestamp", "tokens"},
+		[]string{"source_ip", "network_interface", "timestamp", "tokens"},
 	)
 
 	pktDropCounter = prometheus.NewCounterVec(
@@ -30,12 +30,13 @@ var (
 			Name: "packet_drop_counter",
 			Help: "Total number of dropped packets by ip",
 		},
-		[]string{"source_ip", "interface", "timestamp", "tokens"},
+		[]string{"source_ip", "network_interface", "timestamp", "tokens"},
 	)
 )
 
 type config struct {
 	Interface string `env:"INTERFACE" envDefault:"ens33"`
+	LogLevel  string `env:"LOG_LEVEL" envDefault:"info"`
 }
 
 type PacketState struct {
@@ -56,14 +57,17 @@ func main() {
 		log.Fatal("Unable to parse environment variables: ", err)
 	}
 
+	// Set log level
+	level, err := log.ParseLevel(cfg.LogLevel)
+	if err != nil {
+		log.Fatalf("Invalid log level: %s", err)
+	}
+
+	log.SetLevel(level)
+
 	// Register Prometheus metrics
 	prometheus.MustRegister(pktCounter)
 	prometheus.MustRegister(pktDropCounter)
-
-	// Set debug logging
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.SetOutput(os.Stdout)
-	log.SetPrefix("DEBUG: ")
 
 	// Expose Prometheus metrics via HTTP
 	http.Handle("/metrics", promhttp.Handler())
@@ -103,7 +107,7 @@ func main() {
 
 	defer link.Close()
 
-	log.Printf("start watching %s..", ifname)
+	log.Infof("rate limiting %s..", ifname)
 
 	// Periodically fetch the packet counter from PktCount,
 	// exit the program when interrupted.
@@ -125,7 +129,7 @@ func main() {
 			for iter.Next(&key, &value) {
 				ip := reverseByteOrder(key)
 
-				log.Printf("SourceIP: %s, Value: %+v", ip.String(), value)
+				log.Debugf("SourceIP: %s, Value: %+v", ip.String(), value)
 
 				timestamp := strconv.FormatUint(value.Timestamp, 10)
 				tokens := strconv.FormatUint(uint64(value.Tokens), 10)
@@ -140,7 +144,7 @@ func main() {
 				log.Fatal("Iteration error:", err)
 			}
 		case <-stop:
-			log.Print("Received signal, exiting..")
+			log.Info("Received signal, exiting..")
 
 			return
 		}

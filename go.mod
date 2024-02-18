@@ -6,6 +6,7 @@ require (
 	github.com/caarlos0/env/v10 v10.0.0
 	github.com/cilium/ebpf v0.13.0
 	github.com/prometheus/client_golang v1.18.0
+	github.com/sirupsen/logrus v1.9.3
 )
 
 require (
