@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/caarlos0/env/v10"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +34,10 @@ var (
 	)
 )
 
+type config struct {
+	Interface string `env:"INTERFACE" envDefault:"ens33"`
+}
+
 type PacketState struct {
 	Tokens         uint32
 	Timestamp      uint64
@@ -46,6 +51,11 @@ func reverseByteOrder(ip uint32) net.IP {
 }
 
 func main() {
+	cfg := config{}
+	if err := env.Parse(&cfg); err != nil {
+		log.Fatal("Unable to parse environment variables: ", err)
+	}
+
 	// Register Prometheus metrics
 	prometheus.MustRegister(pktCounter)
 	prometheus.MustRegister(pktDropCounter)
@@ -76,7 +86,7 @@ func main() {
 
 	defer objs.Close()
 
-	ifname := "ens33" // Change this to an interface on your machine.
+	ifname := cfg.Interface
 	iface, err := net.InterfaceByName(ifname)
 	if err != nil {
 		log.Fatalf("Getting interface %s: %s", ifname, err)

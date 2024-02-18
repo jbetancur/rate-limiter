@@ -3,6 +3,7 @@ module github.com/jbetancur/rate-limiter
 go 1.21.7
 
 require (
+	github.com/caarlos0/env/v10 v10.0.0
 	github.com/cilium/ebpf v0.13.0
 	github.com/prometheus/client_golang v1.18.0
 )
