@@ -3,12 +3,34 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+	pktCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "packet_counter",
+			Help: "Total number of packets by ip",
+		},
+		[]string{"source_ip", "interface", "timestamp", "tokens"},
+	)
+
+	pktDropCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "packet_drop_counter",
+			Help: "Total number of dropped packets by ip",
+		},
+		[]string{"source_ip", "interface", "timestamp", "tokens"},
+	)
 )
 
 type PacketState struct {
@@ -24,6 +46,23 @@ func reverseByteOrder(ip uint32) net.IP {
 }
 
 func main() {
+	// Register Prometheus metrics
+	prometheus.MustRegister(pktCounter)
+	prometheus.MustRegister(pktDropCounter)
+
+	// Set debug logging
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetOutput(os.Stdout)
+	log.SetPrefix("DEBUG: ")
+
+	// Expose Prometheus metrics via HTTP
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatal("HTTP server error: ", err)
+		}
+	}()
+
 	// Remove resource limits for kernels <5.11.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("Removing memlock:", err)
@@ -77,12 +116,22 @@ func main() {
 				ip := reverseByteOrder(key)
 
 				log.Printf("SourceIP: %s, Value: %+v", ip.String(), value)
+
+				timestamp := strconv.FormatUint(value.Timestamp, 10)
+				tokens := strconv.FormatUint(uint64(value.Tokens), 10)
+
+				// Update Prometheus counter with the packet count for the source IP
+				pktCounter.WithLabelValues(ip.String(), ifname, timestamp, tokens).Add(float64(value.PktCounter))
+
+				// Update Prometheus counter with the packet drop count for the source IP
+				pktDropCounter.WithLabelValues(ip.String(), ifname, timestamp, tokens).Add(float64(value.PktDropCounter))
 			}
 			if err := iter.Err(); err != nil {
 				log.Fatal("Iteration error:", err)
 			}
 		case <-stop:
 			log.Print("Received signal, exiting..")
+
 			return
 		}
 	}
