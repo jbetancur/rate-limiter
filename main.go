@@ -1,5 +1,7 @@
 package main
 
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=10000 -DRATE=5
+
 import (
 	"net"
 	"net/http"
