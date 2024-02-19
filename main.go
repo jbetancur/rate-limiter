@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.com/caarlos0/env/v10"
@@ -23,10 +24,13 @@ type config struct {
 }
 
 type PacketState struct {
-	Tokens         uint32
-	Timestamp      uint64
-	PktCounter     uint32
-	PktDropCounter uint32
+	Tokens          uint32
+	Timestamp       uint64
+	RateLimited     bool
+	PktDropCounter  uint64
+	Configimit      uint64
+	ConfigRate      uint64
+	ActualRateLimit uint64
 }
 
 // reverseByteOrder reverses the byte order of a 32-bit integer.
@@ -35,29 +39,37 @@ func reverseByteOrder(ip uint32) net.IP {
 }
 
 type metrics struct {
-	pktCounter     *prometheus.GaugeVec
+	rateLimited    *prometheus.GaugeVec
 	pktDropCounter *prometheus.GaugeVec
+	// pktRate        *prometheus.GaugeVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
-		pktCounter: prometheus.NewGaugeVec(
+		rateLimited: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "packet_counter",
-				Help: "Total number of packets by ip",
+				Name: "rate_limited",
+				Help: "If the source_ip is being rate limited",
 			},
-			[]string{"source_ip", "network_interface"},
+			[]string{"source_ip", "network_interface", "packet_rate_limit"},
 		),
 		pktDropCounter: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "packet_drop_counter",
-				Help: "Total number of dropped packets by ip",
+				Name: "rate_limited_drop_counter",
+				Help: "Total number of dropped packets by source_ip",
 			},
-			[]string{"source_ip", "network_interface"},
+			[]string{"source_ip", "network_interface", "packet_rate_limit"},
 		),
+		// pktRate: prometheus.NewGaugeVec(
+		// 	prometheus.GaugeOpts{
+		// 		Name: "packet_rate_seconds",
+		// 		Help: "The current packet rate in seconds",
+		// 	},
+		// 	[]string{"source_ip", "network_interface", "rate_limit"},
+		// ),
 	}
 
-	reg.MustRegister(m.pktCounter, m.pktDropCounter)
+	reg.MustRegister(m.rateLimited, m.pktDropCounter)
 
 	return m
 }
@@ -75,6 +87,13 @@ func serveMetrics() *metrics {
 	}()
 
 	return m
+}
+
+func boolToFloat64(b bool) float64 {
+	if b {
+		return 1.0
+	}
+	return 0.0
 }
 
 func main() {
@@ -123,7 +142,7 @@ func main() {
 
 	defer link.Close()
 
-	log.Infof("Rate limiting %s..", ifname)
+	log.Infof("Rate limiting %s...", ifname)
 
 	// Periodically fetch the packet counter from PktCount,
 	// exit the program when interrupted.
@@ -145,16 +164,22 @@ func main() {
 			for iter.Next(&key, &value) {
 				ip := reverseByteOrder(key)
 				ipStr := ip.String()
+				// limit := strconv.FormatUint(value.Configimit, 10)
+				// rate := strconv.FormatUint(value.ConfigRate, 10)
+				actualRateLimit := strconv.FormatUint(value.ActualRateLimit, 10)
 
 				log.Debugf("SourceIP: %s, Value: %+v", ipStr, value)
 
 				// Update Prometheus counter with the packet count for the source IP
-				m.pktCounter.WithLabelValues(ipStr, ifname).Add(float64(value.PktCounter))
+				m.rateLimited.WithLabelValues(ipStr, ifname, actualRateLimit).Set(boolToFloat64(value.RateLimited))
 
 				// Update Prometheus counter with the packet drop count for the source IP
-				m.pktDropCounter.WithLabelValues(ipStr, ifname).Add(float64(value.PktDropCounter))
+				m.pktDropCounter.WithLabelValues(ipStr, ifname, actualRateLimit).Set(float64(value.PktDropCounter))
 
+				// // Update Prometheus counter with the packet drop count for the source IP
+				// m.pktRate.WithLabelValues(ipStr, ifname, actualRateLimit).Add(float64(value.PktRate))
 			}
+
 			if err := iter.Err(); err != nil {
 				log.Fatal("Iteration error:", err)
 			}

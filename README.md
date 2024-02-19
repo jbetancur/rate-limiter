@@ -52,9 +52,12 @@ wrk -t16 -c100000 -d600s http://10.0.60.23:8000/hello
 
 http://ipaddress:9090/
 
-2 counters are available:
-packet_counter
-packet_drop_counter
+2 guages are available:
+sort_desc(rate_limited)
+rate_limitsort_desc(rate_limited_drop_counter)ed_drop_counter
+
+You can access CPU usage as such:
+100 * avg(1 - rate(node_cpu_seconds_total{mode="idle"}[1m]))
 
 ## Appendix
 

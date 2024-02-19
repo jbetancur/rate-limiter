@@ -7,10 +7,13 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+// The limit of packets within a given rate
 #ifndef PACKET_LIMIT
-#define PACKET_LIMIT 50000
+#define PACKET_LIMIT 10000
 #endif
 
+// The rate limit in packets per second
+// RATELIMIT = PACKET_LIMIT / RATE
 #ifndef RATE
 #define RATE 5
 #endif
@@ -32,8 +35,11 @@ struct bpf_elf_map {
 struct packet_state {
 	__u32	tokens;
 	__u64	timestamp;
-	__u32 	pkt_counter;
-	__u32	pkt_drop_counter;
+	_Bool 	rate_limited;
+	__u64	pkt_drop_counter;
+	__u64	config_limit;
+	__u64 	config_rate;
+	__u64   actual_rate_limit;
 } __attribute__((packed));
 
 struct bpf_elf_map SEC("maps") source_ip_mapping = {
@@ -43,23 +49,16 @@ struct bpf_elf_map SEC("maps") source_ip_mapping = {
 	.max_elem = MAX_MAP_ENTRIES,
 };
 
-// struct bpf_elf_map SEC("maps") config_map = {
-// 	.type = BPF_MAP_TYPE_HASH,
-// 	.key_size = sizeof(char),
-// 	.value_size = sizeof(__u32),
-// 	.max_elem = 2, // Assuming only two config values: PACKET_LIMIT and PACKET_RATE
-// };
-
 /*
 Attempt to parse the IPv4 source address from the packet.
 */
-static __always_inline int parse_ip_src_addr(struct xdp_md *ctx, __u32 *ip_src_addr) {
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data     = (void *)(long)ctx->data;
+static __always_inline int parse_ip_src_addr(struct xdp_md* ctx, __u32* ip_src_addr) {
+	void* data_end = (void*)(long)ctx->data_end;
+	void* data = (void*)(long)ctx->data;
 
 	// First, parse the ethernet header.
-	struct ethhdr *eth = data;
-	if ((void *)(eth + 1) > data_end) {
+	struct ethhdr* eth = data;
+	if ((void*)(eth + 1) > data_end) {
 		return 0;
 	}
 
@@ -67,16 +66,16 @@ static __always_inline int parse_ip_src_addr(struct xdp_md *ctx, __u32 *ip_src_a
 		// The protocol is not IPv4, so we can't parse an IPv4 source address.
 		return 0;
 	}
-  
+
 	// Then parse the IP header.
-	struct iphdr *ip = (void *)(eth + 1);
-	if ((void *)(ip + 1) > data_end) {
+	struct iphdr* ip = (void*)(eth + 1);
+	if ((void*)(ip + 1) > data_end) {
 		return 0;
 	}
 
 	// Return the source IP address in network byte order.
 	*ip_src_addr = (__u32)(ip->saddr);
-	
+
 	return 1;
 }
 
@@ -86,7 +85,7 @@ int rate_limit(struct xdp_md* ctx)
 	struct  packet_state* elem, entry = { 0 };
 	__u64   now;
 	__u32 source_ip;
-	
+
 	if (!parse_ip_src_addr(ctx, &source_ip)) {
 		// Not an IPv4 packet, so don't count it.
 		goto done;
@@ -97,7 +96,10 @@ int rate_limit(struct xdp_md* ctx)
 	if (elem == NULL) {
 		entry.tokens = PACKET_LIMIT;
 		entry.timestamp = bpf_ktime_get_ns();
-		entry.pkt_counter = 1;
+		entry.rate_limited = 0;
+		entry.config_limit = PACKET_LIMIT;
+		entry.config_rate = RATE;
+		entry.actual_rate_limit = PACKET_LIMIT / RATE; // Calculate and store the static rate limit
 
 		bpf_map_update_elem(&source_ip_mapping, &source_ip, &entry, BPF_ANY);
 	}
@@ -105,19 +107,26 @@ int rate_limit(struct xdp_md* ctx)
 		if (elem->tokens == 0) {
 			now = bpf_ktime_get_ns();
 
+			// If the elapsed time from the last packet exceeds the Rate per second, refill the bucket with tokens
 			if (now - elem->timestamp > (NS_IN_SEC * RATE)) {
 				elem->timestamp = now;
 				elem->tokens = PACKET_LIMIT;
+				// Reset when tokens are refilled (no longer rate limited)
+				elem->pkt_drop_counter = 0;
+				elem->rate_limited = 0;
 			}
 			else {
 				elem->pkt_drop_counter++;
+				elem->rate_limited = 1;
 
 				return XDP_DROP;
 			}
 		}
 
 		elem->tokens--;
-		elem->pkt_counter++;
+
+		// Update the rate limit in real-time if it changes via config
+		elem->actual_rate_limit = elem->config_limit / elem->config_rate;
 	}
 
 done:
