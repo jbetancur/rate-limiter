@@ -1,13 +1,12 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=10000 -DRATE=5
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=120000 -DRATE=5
 
 import (
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"time"
 
 	"github.com/caarlos0/env/v10"
@@ -16,24 +15,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
-)
-
-var (
-	pktCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "packet_counter",
-			Help: "Total number of packets by ip",
-		},
-		[]string{"source_ip", "network_interface", "timestamp", "tokens"},
-	)
-
-	pktDropCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "packet_drop_counter",
-			Help: "Total number of dropped packets by ip",
-		},
-		[]string{"source_ip", "network_interface", "timestamp", "tokens"},
-	)
 )
 
 type config struct {
@@ -53,6 +34,49 @@ func reverseByteOrder(ip uint32) net.IP {
 	return net.IPv4(byte(ip), byte(ip>>8), byte(ip>>16), byte(ip>>24))
 }
 
+type metrics struct {
+	pktCounter     *prometheus.GaugeVec
+	pktDropCounter *prometheus.GaugeVec
+}
+
+func NewMetrics(reg prometheus.Registerer) *metrics {
+	m := &metrics{
+		pktCounter: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "packet_counter",
+				Help: "Total number of packets by ip",
+			},
+			[]string{"source_ip", "network_interface"},
+		),
+		pktDropCounter: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "packet_drop_counter",
+				Help: "Total number of dropped packets by ip",
+			},
+			[]string{"source_ip", "network_interface"},
+		),
+	}
+
+	reg.MustRegister(m.pktCounter, m.pktDropCounter)
+
+	return m
+}
+
+func serveMetrics() *metrics {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	pMux := http.NewServeMux()
+
+	promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	pMux.Handle("/metrics", promHandler)
+
+	go func() {
+		log.Fatal(http.ListenAndServe(":8080", pMux))
+	}()
+
+	return m
+}
+
 func main() {
 	cfg := config{}
 	if err := env.Parse(&cfg); err != nil {
@@ -67,17 +91,7 @@ func main() {
 
 	log.SetLevel(level)
 
-	// Register Prometheus metrics
-	prometheus.MustRegister(pktCounter)
-	prometheus.MustRegister(pktDropCounter)
-
-	// Expose Prometheus metrics via HTTP
-	http.Handle("/metrics", promhttp.Handler())
-	go func() {
-		if err := http.ListenAndServe(":8080", nil); err != nil {
-			log.Fatal("HTTP server error: ", err)
-		}
-	}()
+	m := serveMetrics()
 
 	// Remove resource limits for kernels <5.11.
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -109,7 +123,7 @@ func main() {
 
 	defer link.Close()
 
-	log.Infof("rate limiting %s..", ifname)
+	log.Infof("Rate limiting %s..", ifname)
 
 	// Periodically fetch the packet counter from PktCount,
 	// exit the program when interrupted.
@@ -130,17 +144,16 @@ func main() {
 			// Iterate over all key-value pairs in the map.
 			for iter.Next(&key, &value) {
 				ip := reverseByteOrder(key)
+				ipStr := ip.String()
 
-				log.Debugf("SourceIP: %s, Value: %+v", ip.String(), value)
-
-				timestamp := strconv.FormatUint(value.Timestamp, 10)
-				tokens := strconv.FormatUint(uint64(value.Tokens), 10)
+				log.Debugf("SourceIP: %s, Value: %+v", ipStr, value)
 
 				// Update Prometheus counter with the packet count for the source IP
-				pktCounter.WithLabelValues(ip.String(), ifname, timestamp, tokens).Add(float64(value.PktCounter))
+				m.pktCounter.WithLabelValues(ipStr, ifname).Add(float64(value.PktCounter))
 
 				// Update Prometheus counter with the packet drop count for the source IP
-				pktDropCounter.WithLabelValues(ip.String(), ifname, timestamp, tokens).Add(float64(value.PktDropCounter))
+				m.pktDropCounter.WithLabelValues(ipStr, ifname).Add(float64(value.PktDropCounter))
+
 			}
 			if err := iter.Err(); err != nil {
 				log.Fatal("Iteration error:", err)

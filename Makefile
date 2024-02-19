@@ -1,4 +1,4 @@
-.PHONY: clearscr fresh clean
+.PHONY: fresh clean
 
 generate:
 	go generate
@@ -15,4 +15,10 @@ clean:
 	rm -f *.o $(EXEC)
 	rm rate-limiter
 
-fresh: clean 
+fresh: clean
+
+testapp:
+	go run web/main.go
+
+# mon:
+# 	sudo prometheus --config.file=monitoring/prometheus.yml

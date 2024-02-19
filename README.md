@@ -1,6 +1,60 @@
 ## Compile & Run
+```sh
 make compule
 make run
+```
+
+## Load Testing
+
+### Configuration
+VM 4CPU
+8GB Memory
+10G NIC
+
+
+### Simulate a DoS without rate limiting
+
+This should saturate the target. Make sure this is a formidable multicore test machine.
+
+Note: cpu threads depends on test system. e.g. 16cpu = -t32
+
+```sh
+ulimit -n 100000
+wrk -t32 -c100000 -d600s http://10.0.60.23:8000/hello
+```
+
+### Simulate a DoS with rate limiting 
+
+We are going to set our rate limited in main.go to the following:
+
+ -DPACKET_LIMIT=120000 -DRATE=5
+
+#### Start the twest web app
+
+```sh
+make testapp
+```
+
+#### Start the rate limiter
+In another tab or terminal start the rate limiter
+
+```sh
+make compile && make run
+```
+
+#### On another machine start the loadtst
+
+```sh
+wrk -t16 -c100000 -d600s http://10.0.60.23:8000/hello
+```
+
+## Monitoring
+
+http://ipaddress:9090/
+
+2 counters are available:
+packet_counter
+packet_drop_counter
 
 ## Appendix
 
@@ -28,7 +82,7 @@ clang -O2 -target bpf -c rate_limiter.c -o rate_limiter.o
 
 ### Attach/Detach
 sudo ip link set dev ens33 xdp obj rate_limiter.o sec rate_limiter
- sudo ip link set dev ens33 xdp off
+sudo ip link set dev ens33 xdp off
 
 ### Tests
 Without
