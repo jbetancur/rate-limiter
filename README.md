@@ -1,3 +1,15 @@
+## Rate Limiting Logic
+
+- When a packet arrives, the rate_limit function checks if this is a valid IPV4 packet 
+- The packet header is read for the source IP address
+- The IP addess is added to the packet_state map
+- If the IP address is not found in the map, it initializes a new entry in the map with the maximum number of tokens and other necessary information.
+- This limiter uses the Token Bucket algorithm
+- If tokens are available for the IP address, it decrements the token coun (PACKET_LIMIT). If no tokens are available, it checks if enough time has elapsed (RATE) to refill the bucket. If not, it drops the packet.
+- The rate limit is calculated based on the configured packet limit and rate, and it's updated in real-time if it changes via configuration.
+
+## Architecture
+
 ## Compile & Run
 ```sh
 make compule
@@ -54,10 +66,49 @@ http://ipaddress:9090/
 
 2 guages are available:
 sort_desc(rate_limited)
-rate_limitsort_desc(rate_limited_drop_counter)ed_drop_counter
+sort_desc(rate_limited_drops)
+sort_desc(rate_limited_tokens)
 
 You can access CPU usage as such:
 100 * avg(1 - rate(node_cpu_seconds_total{mode="idle"}[1m]))
+
+### Install Prometheus
+
+```sh
+...
+sudo vim /etc/prometheus/prometheus.yml
+```
+
+Add a new target under job name `prometheus`
+
+```sh
+...
+    static_configs:
+      - targets: ['localhost:8080']
+      ...
+```
+
+### Install Grafana
+
+```sh
+# Install
+sudo apt-get install -y apt-transport-https software-properties-common wget
+sudo mkdir -p /etc/apt/keyrings/
+wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/grafana.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com beta main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+# Updates the list of available packages
+sudo apt-get update
+# Installs the latest OSS release:
+sudo apt-get install grafana
+ # Start
+sudo systemctl daemon-reload
+sudo systemctl start grafana-server
+sudo systemctl status grafana-server
+sudo systemctl enable grafana-server.service
+```
+
+
 
 ## Appendix
 

@@ -8,7 +8,7 @@ build:
 
 compile: generate build
 
-run: 
+run: generate build
 	sudo ./rate-limiter
 
 clean:

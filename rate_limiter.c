@@ -19,7 +19,7 @@
 #endif
 
 #ifndef MAX_MAP_ENTRIES
-#define MAX_MAP_ENTRIES 500
+#define MAX_MAP_ENTRIES 10000
 #endif
 
 #define NS_IN_SEC 1000000000LL

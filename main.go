@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=120000 -DRATE=5
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=10000 -DRATE=5
 
 import (
 	"net"
@@ -19,8 +19,9 @@ import (
 )
 
 type config struct {
-	Interface string `env:"INTERFACE" envDefault:"ens33"`
-	LogLevel  string `env:"LOG_LEVEL" envDefault:"info"`
+	Interface           string `env:"INTERFACE" envDefault:"ens33"`
+	DebugFilterSourceIP string `env:"DEBUG_FILTER_SOURCE_IP"`
+	LogLevel            string `env:"LOG_LEVEL" envDefault:"info"`
 }
 
 type PacketState struct {
@@ -41,7 +42,7 @@ func reverseByteOrder(ip uint32) net.IP {
 type metrics struct {
 	rateLimited    *prometheus.GaugeVec
 	pktDropCounter *prometheus.GaugeVec
-	// pktRate        *prometheus.GaugeVec
+	tokens         *prometheus.GaugeVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *metrics {
@@ -55,21 +56,21 @@ func NewMetrics(reg prometheus.Registerer) *metrics {
 		),
 		pktDropCounter: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: "rate_limited_drop_counter",
+				Name: "rate_limited_drops",
 				Help: "Total number of dropped packets by source_ip",
 			},
 			[]string{"source_ip", "network_interface", "packet_rate_limit"},
 		),
-		// pktRate: prometheus.NewGaugeVec(
-		// 	prometheus.GaugeOpts{
-		// 		Name: "packet_rate_seconds",
-		// 		Help: "The current packet rate in seconds",
-		// 	},
-		// 	[]string{"source_ip", "network_interface", "rate_limit"},
-		// ),
+		tokens: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "rate_limited_tokens",
+				Help: "Available tokens. Mac tokens should be equal to the packet limit, but when 0 indicates the packets are rate limited",
+			},
+			[]string{"source_ip", "network_interface", "rate_limit"},
+		),
 	}
 
-	reg.MustRegister(m.rateLimited, m.pktDropCounter)
+	reg.MustRegister(m.rateLimited, m.pktDropCounter, m.tokens)
 
 	return m
 }
@@ -170,14 +171,14 @@ func main() {
 
 				log.Debugf("SourceIP: %s, Value: %+v", ipStr, value)
 
-				// Update Prometheus counter with the packet count for the source IP
+				// Update Prometheus guage with the packet count for the source IP
 				m.rateLimited.WithLabelValues(ipStr, ifname, actualRateLimit).Set(boolToFloat64(value.RateLimited))
 
-				// Update Prometheus counter with the packet drop count for the source IP
+				// Update Prometheus guage with the packet drop count for the source IP
 				m.pktDropCounter.WithLabelValues(ipStr, ifname, actualRateLimit).Set(float64(value.PktDropCounter))
 
-				// // Update Prometheus counter with the packet drop count for the source IP
-				// m.pktRate.WithLabelValues(ipStr, ifname, actualRateLimit).Add(float64(value.PktRate))
+				// Update Prometheus guage with the packet drop count for the source IP
+				m.tokens.WithLabelValues(ipStr, ifname, actualRateLimit).Set(float64(value.Tokens))
 			}
 
 			if err := iter.Err(); err != nil {
