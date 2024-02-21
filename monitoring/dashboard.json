@@ -68,7 +68,7 @@
       ],
       "timeFrom": null,
       "timeShift": null,
-      "title": "CPU",
+      "title": "CPU (4vCPU)",
       "type": "gauge"
     },
     {
@@ -121,7 +121,7 @@
       ],
       "timeFrom": null,
       "timeShift": null,
-      "title": "Memory",
+      "title": "Memory (8GB)",
       "type": "gauge"
     },
     {
@@ -191,7 +191,7 @@
       "id": 2,
       "links": [],
       "options": {
-        "colorMode": "value",
+        "colorMode": "background",
         "fieldOptions": {
           "calcs": [
             "lastNotNull"
@@ -223,8 +223,8 @@
       "pluginVersion": "6.7.4",
       "targets": [
         {
-          "expr": "sort_desc(topk(5,rate_limited))",
-          "instant": false,
+          "expr": "sort_desc(topk(5, rate_limited))",
+          "instant": true,
           "interval": "",
           "legendFormat": "{{source_ip}}",
           "refId": "A"
@@ -336,7 +336,7 @@
       "pluginVersion": "6.7.4",
       "targets": [
         {
-          "expr": "sort_desc(topk(5, rate_limited_tokens))",
+          "expr": "bottomk(5, sort(rate_limited_tokens))",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -382,5 +382,5 @@
   "variables": {
     "list": []
   },
-  "version": 29
+  "version": 38
 }

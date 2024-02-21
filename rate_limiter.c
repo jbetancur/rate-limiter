@@ -43,7 +43,7 @@ struct packet_state {
 } __attribute__((packed));
 
 struct bpf_elf_map SEC("maps") source_ip_mapping = {
-	.type = BPF_MAP_TYPE_HASH,
+	.type = BPF_MAP_TYPE_LRU_HASH,
 	.key_size = sizeof(__u32), // Assuming IPv4 addresses
 	.value_size = sizeof(struct packet_state),
 	.max_elem = MAX_MAP_ENTRIES,
@@ -62,8 +62,8 @@ static __always_inline int parse_ip_src_addr(struct xdp_md* ctx, __u32* ip_src_a
 		return 0;
 	}
 
+	// The protocol is not IPv4, so we can't parse an IPv4 source address.
 	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
-		// The protocol is not IPv4, so we can't parse an IPv4 source address.
 		return 0;
 	}
 
@@ -99,7 +99,7 @@ int rate_limit(struct xdp_md* ctx)
 		entry.rate_limited = 0;
 		entry.config_limit = PACKET_LIMIT;
 		entry.config_rate = RATE;
-		entry.actual_rate_limit = PACKET_LIMIT / RATE; // Calculate and store the static rate limit
+		entry.actual_rate_limit = PACKET_LIMIT / RATE;
 
 		bpf_map_update_elem(&source_ip_mapping, &source_ip, &entry, BPF_ANY);
 	}

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"time"
 
 	"github.com/caarlos0/env/v10"
@@ -29,7 +28,7 @@ type PacketState struct {
 	Timestamp       uint64
 	RateLimited     bool
 	PktDropCounter  uint64
-	Configimit      uint64
+	ConfigLimit     uint64
 	ConfigRate      uint64
 	ActualRateLimit uint64
 }
@@ -45,28 +44,28 @@ type metrics struct {
 	tokens         *prometheus.GaugeVec
 }
 
-func NewMetrics(reg prometheus.Registerer) *metrics {
+func newMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
 		rateLimited: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited",
 				Help: "If the source_ip is being rate limited",
 			},
-			[]string{"source_ip", "network_interface", "packet_rate_limit"},
+			[]string{"source_ip", "network_interface"},
 		),
 		pktDropCounter: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited_drops",
 				Help: "Total number of dropped packets by source_ip",
 			},
-			[]string{"source_ip", "network_interface", "packet_rate_limit"},
+			[]string{"source_ip", "network_interface"},
 		),
 		tokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited_tokens",
 				Help: "Available tokens. Mac tokens should be equal to the packet limit, but when 0 indicates the packets are rate limited",
 			},
-			[]string{"source_ip", "network_interface", "rate_limit"},
+			[]string{"source_ip", "network_interface"},
 		),
 	}
 
@@ -77,7 +76,7 @@ func NewMetrics(reg prometheus.Registerer) *metrics {
 
 func serveMetrics() *metrics {
 	reg := prometheus.NewRegistry()
-	m := NewMetrics(reg)
+	m := newMetrics(reg)
 	pMux := http.NewServeMux()
 
 	promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
@@ -165,20 +164,20 @@ func main() {
 			for iter.Next(&key, &value) {
 				ip := reverseByteOrder(key)
 				ipStr := ip.String()
-				// limit := strconv.FormatUint(value.Configimit, 10)
+				// limit := strconv.FormatUint(value.ConfigLimit, 10)
 				// rate := strconv.FormatUint(value.ConfigRate, 10)
-				actualRateLimit := strconv.FormatUint(value.ActualRateLimit, 10)
+				// actualRateLimit := strconv.FormatUint(value.ActualRateLimit, 10)
 
 				log.Debugf("SourceIP: %s, Value: %+v", ipStr, value)
 
 				// Update Prometheus guage with the packet count for the source IP
-				m.rateLimited.WithLabelValues(ipStr, ifname, actualRateLimit).Set(boolToFloat64(value.RateLimited))
+				m.rateLimited.WithLabelValues(ipStr, ifname).Set(boolToFloat64(value.RateLimited))
 
 				// Update Prometheus guage with the packet drop count for the source IP
-				m.pktDropCounter.WithLabelValues(ipStr, ifname, actualRateLimit).Set(float64(value.PktDropCounter))
+				m.pktDropCounter.WithLabelValues(ipStr, ifname).Set(float64(value.PktDropCounter))
 
 				// Update Prometheus guage with the packet drop count for the source IP
-				m.tokens.WithLabelValues(ipStr, ifname, actualRateLimit).Set(float64(value.Tokens))
+				m.tokens.WithLabelValues(ipStr, ifname).Set(float64(value.Tokens))
 			}
 
 			if err := iter.Err(); err != nil {
