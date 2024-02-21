@@ -16,13 +16,18 @@ make compule
 make run
 ```
 
+## Run in a container
+```sh
+sudo docker build -t rate-limiter .
+sudo docker run --privileged --network host rate-limiter
+```
+
 ## Load Testing
 
 ### Configuration
 VM 4CPU
 8GB Memory
 10G NIC
-
 
 ### Simulate a DoS without rate limiting
 
