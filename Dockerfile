@@ -6,9 +6,6 @@ ENV INTERFACE "ens33"
 # Copy your eBPF program and loader script into the container
 COPY rate-limiter .
 
-# Set the working directory
-WORKDIR .
-
 # Make the loader script executable
 RUN chmod +x rate-limiter
 

@@ -10,6 +10,14 @@
 
 ## Architecture
 
+## Install ebpf Dependancies
+
+```sh
+sudo apt install libbpf-dev libelf-dev clang llvm -y
+pkg-config --modversion libbpf
+```
+
+
 ## Compile & Run
 ```sh
 make compule
@@ -113,6 +121,13 @@ sudo systemctl status grafana-server
 sudo systemctl enable grafana-server.service
 ```
 
+For demo purposes change the min_refresh_interval to 1s in /etc/grafana/grafana.ini
+
+```sh
+sudo vim /etc/grafana/grafana.ini
+min_refresh_interval = 1s
+```
+
 ## Appendix
 
 ### simulate
@@ -131,7 +146,7 @@ sudo cat /sys/kernel/debug/tracing/trace_pipe
 
 ### Build
 clang -O2 -target bpf -c rate_limiter.c -o rate_limiter.o
-
+sudo apt install libc-dev
 ### Attach/Detach
 sudo ip link set dev ens33 xdp obj rate_limiter.o sec rate_limiter
 sudo ip link set dev ens33 xdp off

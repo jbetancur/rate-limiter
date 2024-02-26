@@ -8,6 +8,12 @@ build:
 
 compile: generate build
 
+build-image: compile
+	docker build -t rate-limiter .
+
+run-container: build-image
+	sudo docker run --privileged --network host rate-limiter
+
 run: generate build
 	sudo ./rate-limiter
 
