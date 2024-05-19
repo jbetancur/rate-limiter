@@ -1,3 +1,4 @@
 *.o
 rate-limiter
-.vscode
+.vscode/*
+.idea/*
