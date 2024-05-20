@@ -1,9 +1,9 @@
 ## Rate Limiting Logic
 
-- When a packet arrives, the rate_limit function checks if this is a valid IPV4 packet 
-- The packet header is read for the source IP address
-- The IP addess is added to the packet_state map
-- If the IP address is not found in the map, it initializes a new entry in the map with the maximum number of tokens and other necessary information.
+- When a packet arrives, the rate_limit function checks if this is a valid IPV4 packet
+- The packet header is read for the source IP address and source port
+- The source IP/Port are added to the packet_state map
+- If the IP/Port is not found in the map, it initializes a new entry in the map with the maximum number of tokens and other necessary information.
 - This limiter uses the Token Bucket algorithm
 - If tokens are available for the IP address, it decrements the token coun (PACKET_LIMIT). If no tokens are available, it checks if enough time has elapsed (RATE) to refill the bucket. If not, it drops the packet.
 - The rate limit is calculated based on the configured packet limit and rate, and it's updated in real-time if it changes via configuration.

@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=5000 -DRATE=5
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=2000 -DRATE=5
 
 import (
 	"fmt"
@@ -32,7 +32,7 @@ type PortKey struct {
 
 type PacketState struct {
 	Tokens          uint32
-	Timestamp       uint64
+	LastRefill      uint64
 	RateLimited     bool
 	PktDropCounter  uint64
 	ConfigLimit     uint64
@@ -40,7 +40,15 @@ type PacketState struct {
 	ActualRateLimit uint64
 }
 
-type metrics struct {
+type Metric struct {
+	SrcIP          uint32
+	SrcPort        uint16
+	PktDropCounter uint64
+	PktCount       uint64
+	Timestamp      uint64
+}
+
+type Metrics struct {
 	rateLimited    *prometheus.GaugeVec
 	pktDropCounter *prometheus.GaugeVec
 	tokens         *prometheus.GaugeVec
@@ -51,8 +59,8 @@ func reverseByteOrder(ip uint32) net.IP {
 	return net.IPv4(byte(ip), byte(ip>>8), byte(ip>>16), byte(ip>>24))
 }
 
-func newMetrics(reg prometheus.Registerer) *metrics {
-	m := &metrics{
+func newMetrics(reg prometheus.Registerer) *Metrics {
+	m := &Metrics{
 		rateLimited: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited",
@@ -70,7 +78,7 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 		tokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited_tokens",
-				Help: "Available tokens. Mac tokens should be equal to the packet limit, but when 0 indicates the packets are rate limited",
+				Help: "Available tokens. Max tokens should be equal to the packet limit, but when 0 indicates the packets are rate limited",
 			},
 			[]string{"connection", "network_interface"},
 		),
@@ -81,7 +89,7 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 	return m
 }
 
-func serveMetrics() *metrics {
+func serveMetrics() *Metrics {
 	reg := prometheus.NewRegistry()
 	m := newMetrics(reg)
 	pMux := http.NewServeMux()
@@ -103,6 +111,35 @@ func boolToFloat64(b bool) float64 {
 	return 0.0
 }
 
+func fetchAndProcessMetrics(objs *rate_limiterObjects, networkInterface string, m *Metrics) {
+	// Create an iterator for the map.
+	iter := objs.Connections.Iterate()
+
+	// Define variables to hold key and value.
+	var key PortKey
+	var value PacketState
+
+	// Iterate over all key-value pairs in the map.
+	for iter.Next(&key, &value) {
+		ip := reverseByteOrder(key.SrcIP).String()
+		keyedBy := fmt.Sprintf("%s:%d", ip, key.SrcPort)
+		log.Debugf("Source: %s, Value: %+v", keyedBy, value)
+
+		// Update Prometheus gauge with the packet count for the source port
+		m.rateLimited.WithLabelValues(keyedBy, networkInterface).Set(boolToFloat64(value.RateLimited))
+
+		// Update Prometheus gauge with the packet drop count for the source port
+		m.pktDropCounter.WithLabelValues(keyedBy, networkInterface).Set(float64(value.PktDropCounter))
+
+		// Update Prometheus gauge with the token count for the source port
+		m.tokens.WithLabelValues(keyedBy, networkInterface).Set(float64(value.Tokens))
+	}
+
+	if err := iter.Err(); err != nil {
+		log.Fatal("Iteration error:", err)
+	}
+}
+
 func run(networkInterface string) {
 	m := serveMetrics()
 
@@ -120,7 +157,7 @@ func run(networkInterface string) {
 	}
 
 	// Attach rate_limiter to the network interface.
-	link, err := link.AttachXDP(link.XDPOptions{
+	l, err := link.AttachXDP(link.XDPOptions{
 		Program:   objs.RateLimit,
 		Interface: iface.Index,
 	})
@@ -128,46 +165,20 @@ func run(networkInterface string) {
 		log.Fatal("Attaching XDP:", err)
 	}
 
-	defer link.Close()
+	defer l.Close()
 
 	log.Infof("Rate limiting %s...", networkInterface)
 
-	// Periodically fetch the packet counter from PktCount,
+	// Periodically fetch metrics.
 	// exit the program when interrupted.
-	tick := time.Tick(time.Second)
+	tick := time.Tick(time.Second / 2) // Adjusted for higher precision
 	stop := make(chan os.Signal, 5)
 	signal.Notify(stop, os.Interrupt)
 
 	for {
 		select {
 		case <-tick:
-			// Create an iterator for the map.
-			iter := objs.Connections.Iterate()
-
-			// Define variables to hold key and value.
-			var key PortKey
-			var value PacketState
-
-			// Iterate over all key-value pairs in the map.
-			for iter.Next(&key, &value) {
-				ip := reverseByteOrder(key.SrcIP).String()
-
-				keyedBy := fmt.Sprintf("%s:%d", ip, key.SrcPort)
-				log.Debugf("Source: %s, Value: %+v", ip, value)
-
-				// Update Prometheus guage with the packet count for the source port
-				m.rateLimited.WithLabelValues(keyedBy, networkInterface).Set(boolToFloat64(value.RateLimited))
-
-				// Update Prometheus guage with the packet drop count for the source port
-				m.pktDropCounter.WithLabelValues(keyedBy, networkInterface).Set(float64(value.PktDropCounter))
-
-				// Update Prometheus guage with the packet drop count for the source port
-				m.tokens.WithLabelValues(keyedBy, networkInterface).Set(float64(value.Tokens))
-			}
-
-			if err := iter.Err(); err != nil {
-				log.Fatal("Iteration error:", err)
-			}
+			go fetchAndProcessMetrics(&objs, networkInterface, m)
 		case <-stop:
 			log.Info("Received signal, exiting..")
 
