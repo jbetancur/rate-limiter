@@ -60,7 +60,8 @@ type rate_limiterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type rate_limiterMapSpecs struct {
-	SourceIpMapping *ebpf.MapSpec `ebpf:"source_ip_mapping"`
+	Connections *ebpf.MapSpec `ebpf:"connections"`
+	Events      *ebpf.MapSpec `ebpf:"events"`
 }
 
 // rate_limiterObjects contains all objects after they have been loaded into the kernel.
@@ -82,12 +83,14 @@ func (o *rate_limiterObjects) Close() error {
 //
 // It can be passed to loadRate_limiterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type rate_limiterMaps struct {
-	SourceIpMapping *ebpf.Map `ebpf:"source_ip_mapping"`
+	Connections *ebpf.Map `ebpf:"connections"`
+	Events      *ebpf.Map `ebpf:"events"`
 }
 
 func (m *rate_limiterMaps) Close() error {
 	return _Rate_limiterClose(
-		m.SourceIpMapping,
+		m.Connections,
+		m.Events,
 	)
 }
 

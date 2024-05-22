@@ -2,135 +2,222 @@
 
 #include <stdint.h>
 #include <linux/bpf.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
+#include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-// The limit of packets within a given rate
 #ifndef PACKET_LIMIT
 #define PACKET_LIMIT 10000
 #endif
 
-// The rate limit in packets per second
-// RATELIMIT = PACKET_LIMIT / RATE
 #ifndef RATE
 #define RATE 5
 #endif
 
 #ifndef MAX_MAP_ENTRIES
-#define MAX_MAP_ENTRIES 10000
+#define MAX_MAP_ENTRIES 65536
 #endif
 
 #define NS_IN_SEC 1000000000LL
 
+#define bpf_printk(fmt, ...)                             \
+({                                                       \
+    char ____fmt[] = fmt;                                \
+    bpf_trace_printk(____fmt, sizeof(____fmt),           \
+    ##__VA_ARGS__);                     \
+})
+
+struct port_key {
+    __u32 src_ip;
+    __u16 src_port;
+    __u16 padding; // Padding for alignment
+};
+
 struct bpf_elf_map {
-	__u32	type;
-	__u32	key_size;
-	__u32	value_size;
-	__u32	max_elem;
-	__u32	flags;
+    __u32 type;
+    __u32 key_size;
+    __u32 value_size;
+    __u32 max_elem;
+    __u32 flags;
 };
 
 struct packet_state {
-	__u32	tokens;
-	__u64	timestamp;
-	_Bool 	rate_limited;
-	__u64	pkt_drop_counter;
-	__u64	config_limit;
-	__u64 	config_rate;
-	__u64   actual_rate_limit;
+    __u32 tokens;
+    __u64 last_refill;
+    _Bool rate_limited;
+    __u64 pkt_drop_counter;
+    __u64 config_limit;
+    __u64 config_rate;
+    __u64 actual_rate_limit;
 } __attribute__((packed));
 
-struct bpf_elf_map SEC("maps") source_ip_mapping = {
-	.type = BPF_MAP_TYPE_LRU_HASH,
-	.key_size = sizeof(__u32), // Assuming IPv4 addresses
-	.value_size = sizeof(struct packet_state),
-	.max_elem = MAX_MAP_ENTRIES,
+struct bpf_elf_map SEC("maps") connections = {
+    .type = BPF_MAP_TYPE_LRU_HASH,
+    .key_size = sizeof(struct port_key),
+    .value_size = sizeof(struct packet_state),
+    .max_elem = MAX_MAP_ENTRIES,
 };
 
-/*
-Attempt to parse the IPv4 source address from the packet.
-*/
-static __always_inline int parse_ip_src_addr(struct xdp_md* ctx, __u32* ip_src_addr) {
-	void* data_end = (void*)(long)ctx->data_end;
-	void* data = (void*)(long)ctx->data;
+struct metrics {
+    __u32 src_ip;
+    __u16 src_port;
+    __u64 pkt_drop_counter;
+    __u64 pkt_count;
+    __u64 last_refill;
+};
 
-	// First, parse the ethernet header.
-	struct ethhdr* eth = data;
-	if ((void*)(eth + 1) > data_end) {
-		return 0;
-	}
+struct bpf_elf_map SEC("maps") events = {
+    .type = BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(__u32),
+    .max_elem = 0,
+};
 
-	// The protocol is not IPv4, so we can't parse an IPv4 source address.
-	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
-		return 0;
-	}
+// Function to parse packet headers
+static __always_inline int parse_packet_headers(struct xdp_md* ctx, __u16* src_port, __u32* src_ip) {
+    void* data_end = (void*)(long)ctx->data_end;
+    void* data = (void*)(long)ctx->data;
+    struct ethhdr* eth = data;
 
-	// Then parse the IP header.
-	struct iphdr* ip = (void*)(eth + 1);
-	if ((void*)(ip + 1) > data_end) {
-		return 0;
-	}
+    // Parse the ethernet header.
+    if ((void*)(eth + 1) > data_end) {
+        return 0;
+    }
 
-	// Return the source IP address in network byte order.
-	*ip_src_addr = (__u32)(ip->saddr);
+    // The protocol is not IPv4, so we can't parse an IPv4 source address.
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) {
+        return 0;
+    }
 
-	return 1;
+    struct iphdr* ip = (struct iphdr*)(eth + 1);
+    if ((void*)(ip + 1) > data_end) {
+        return 0;
+    }
+
+    *src_ip = ip->saddr;
+
+    if (ip->protocol == IPPROTO_TCP) {
+        struct tcphdr* tcp = (struct tcphdr*)(ip + 1);
+
+        if ((void*)(tcp + 1) > data_end) {
+            return 0;
+        }
+
+        *src_port = bpf_ntohs(tcp->source);
+    }
+    else if (ip->protocol == IPPROTO_UDP) {
+        struct udphdr* udp = (struct udphdr*)(ip + 1);
+
+        if ((void*)(udp + 1) > data_end) {
+            return 0;
+        }
+
+        *src_port = bpf_ntohs(udp->source);
+    }
+    else {
+        return 0;
+    }
+
+    return 1;
 }
 
+// Function to initialize a new packet state
+static __always_inline void init_state(struct packet_state* state) {
+    state->tokens = PACKET_LIMIT;
+    state->last_refill = bpf_ktime_get_ns();
+    state->rate_limited = 0;
+    state->config_limit = PACKET_LIMIT;
+    state->config_rate = RATE;
+    state->actual_rate_limit = PACKET_LIMIT / RATE;
+    state->pkt_drop_counter = 0;
+}
+
+// Function to add tokens based on elapsed time
+static __always_inline void add_tokens(struct packet_state* state, __u64 now) {
+    __u64 elapsed_time_ns = now - state->last_refill;
+
+    // Calculate the number of tokens to add based on the elapsed nanoseconds
+    // elapsed_time_ns (nanoseconds)
+    // state->config_rate (tokens/second)
+    // NS_IN_SEC (nanoseconds/second)
+    // For example, if elapsed_time_ns is 5000000000 nanoseconds (5 seconds) and state->config_rate is 10 tokens/second:
+    // tokens_to_add = (5000000000 * 10) / 1000000000
+    // tokens_to_add = 50000000000 / 1000000000
+    // tokens_to_add = 50    
+    __u64 tokens_to_add = (elapsed_time_ns * state->config_rate) / NS_IN_SEC;
+
+    // bpf_printk("toadd: %d", tokens_to_add);
+
+    if (tokens_to_add > 0) {
+        state->tokens = (state->tokens + tokens_to_add > state->config_limit) ? state->config_limit : state->tokens + tokens_to_add;
+        state->last_refill = now; // Update last refill to the current time
+    }
+}
+
+static __always_inline int handle_rate_limit(struct xdp_md* ctx, struct packet_state* state, struct port_key* key) {
+    struct metrics metric = { 0 };
+    __u64 now = bpf_ktime_get_ns();
+
+    // Add tokens to the bucket
+    add_tokens(state, now);
+
+    // Check if there are enough tokens to pass the packet
+    if (state->tokens > 0) {
+        state->tokens--;
+        state->rate_limited = 0;
+
+        // Send metrics to user-space even when not rate limited
+        metric.src_ip = key->src_ip;
+        metric.src_port = key->src_port;
+        metric.pkt_drop_counter = state->pkt_drop_counter;
+        metric.last_refill = state->last_refill;
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &metric, sizeof(metric));
+
+        return XDP_PASS;
+    }
+
+    state->pkt_drop_counter++;
+    state->rate_limited = 1;
+
+    // Collect and send metrics to user-space
+    metric.src_ip = key->src_ip;
+    metric.src_port = key->src_port;
+    metric.pkt_drop_counter = state->pkt_drop_counter;
+    metric.last_refill = state->last_refill;
+    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &metric, sizeof(metric));
+
+    return XDP_DROP;
+}
+
+
 SEC("xdp")
-int rate_limit(struct xdp_md* ctx)
-{
-	struct  packet_state* elem, entry = { 0 };
-	__u64   now;
-	__u32 source_ip;
+int rate_limit(struct xdp_md* ctx) {
+    struct port_key key = { 0 };
+    struct packet_state* state;
+    struct packet_state new_state;
 
-	if (!parse_ip_src_addr(ctx, &source_ip)) {
-		// Not an IPv4 packet, so don't count it.
-		goto done;
-	}
+    if (!parse_packet_headers(ctx, &key.src_port, &key.src_ip)) {
+        return XDP_PASS;
+    }
 
-	elem = bpf_map_lookup_elem(&source_ip_mapping, &source_ip);
+    state = bpf_map_lookup_elem(&connections, &key);
 
-	if (elem == NULL) {
-		entry.tokens = PACKET_LIMIT;
-		entry.timestamp = bpf_ktime_get_ns();
-		entry.rate_limited = 0;
-		entry.config_limit = PACKET_LIMIT;
-		entry.config_rate = RATE;
-		entry.actual_rate_limit = PACKET_LIMIT / RATE;
+    if (!state) {
+        init_state(&new_state);
+        bpf_map_update_elem(&connections, &key, &new_state, BPF_ANY);
+        state = bpf_map_lookup_elem(&connections, &key);
 
-		bpf_map_update_elem(&source_ip_mapping, &source_ip, &entry, BPF_ANY);
-	}
-	else {
-		if (elem->tokens == 0) {
-			now = bpf_ktime_get_ns();
+        if (!state) {
+            return XDP_PASS; // Shouldn't happen, but safe check
+        }
+    }
 
-			// If the elapsed time from the last packet exceeds the Rate per second, refill the bucket with tokens
-			if (now - elem->timestamp > (NS_IN_SEC * RATE)) {
-				elem->timestamp = now;
-				elem->tokens = PACKET_LIMIT;
-				// Reset when tokens are refilled (no longer rate limited)
-				elem->pkt_drop_counter = 0;
-				elem->rate_limited = 0;
-			}
-			else {
-				elem->pkt_drop_counter++;
-				elem->rate_limited = 1;
-
-				return XDP_DROP;
-			}
-		}
-
-		elem->tokens--;
-
-		// Update the rate limit in real-time if it changes via config
-		elem->actual_rate_limit = elem->config_limit / elem->config_rate;
-	}
-
-done:
-	return XDP_PASS;
+    // Handle rate limiting
+    return handle_rate_limit(ctx, state, &key);
 }
 
 char _license[] SEC("license") = "GPL";

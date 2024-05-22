@@ -1,9 +1,9 @@
 ## Rate Limiting Logic
 
-- When a packet arrives, the rate_limit function checks if this is a valid IPV4 packet 
-- The packet header is read for the source IP address
-- The IP addess is added to the packet_state map
-- If the IP address is not found in the map, it initializes a new entry in the map with the maximum number of tokens and other necessary information.
+- When a packet arrives, the rate_limit function checks if this is a valid IPV4 packet
+- The packet header is read for the source IP address and source port
+- The source IP/Port are added to the packet_state map
+- If the IP/Port is not found in the map, it initializes a new entry in the map with the maximum number of tokens and other necessary information.
 - This limiter uses the Token Bucket algorithm
 - If tokens are available for the IP address, it decrements the token coun (PACKET_LIMIT). If no tokens are available, it checks if enough time has elapsed (RATE) to refill the bucket. If not, it drops the packet.
 - The rate limit is calculated based on the configured packet limit and rate, and it's updated in real-time if it changes via configuration.
@@ -20,7 +20,7 @@ pkg-config --modversion libbpf
 
 ## Compile & Run
 ```sh
-make compule
+make compile
 make run
 ```
 
@@ -54,7 +54,7 @@ We are going to set our rate limited in main.go to the following:
 
  -DPACKET_LIMIT=120000 -DRATE=5
 
-#### Start the twest web app
+#### Start the test web app
 
 ```sh
 make testapp
@@ -128,6 +128,21 @@ sudo vim /etc/grafana/grafana.ini
 min_refresh_interval = 1s
 ```
 
+## COnsiderations for a more Dynamic Approach
+### Anomaly Detection
+
+- Incorporate anomaly detection algorithms such as moving average, exponential smoothing, or machine learning models to identify unusual traffic patterns that may indicate malicious activity or system issues.
+- Monitor packet arrival times and sizes to detect deviations from normal behavior.
+- Implement thresholds or rules based on historical data or predefined patterns to trigger alerts or actions when anomalies are detected.
+
+### Statistical Analysis:
+
+- Collect and analyze statistical metrics such as packet arrival rates, packet sizes, source IP distributions, and protocol distributions.
+- Utilize statistical methods like mean, median, variance, standard deviation, and percentiles to characterize network traffic and identify trends or abnormalities
+
+### 
+
+
 ## Appendix
 
 ### simulate
@@ -142,7 +157,24 @@ ulimit -n 100000
 sudo apt install wrk bmon
 
 ### DEBUG
+
+Add the following function to the rate_limter.c
+
+```c
+#define bpf_printk(fmt, ...)                             \
+({                                                       \
+    char ____fmt[] = fmt;                                \
+    bpf_trace_printk(____fmt, sizeof(____fmt),           \
+                     ##__VA_ARGS__);                     \
+})
+```
+You can then add `bpf_printk("::TEST::setting source port\n");` statments
+
+To view traces:
+
+```sh
 sudo cat /sys/kernel/debug/tracing/trace_pipe
+```
 
 ### Build
 clang -O2 -target bpf -c rate_limiter.c -o rate_limiter.o
