@@ -1,13 +1,15 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=2000 -DRATE=5
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=10000 -DRATE=5
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v10"
@@ -40,6 +42,11 @@ type PacketState struct {
 	ActualRateLimit uint64
 }
 
+type CIDRKey struct {
+	Network   uint32
+	PrefixLen uint32
+}
+
 type Metric struct {
 	SrcIP          uint32
 	SrcPort        uint16
@@ -66,21 +73,21 @@ func newMetrics(reg prometheus.Registerer) *Metrics {
 				Name: "rate_limited",
 				Help: "If the connection is being rate limited",
 			},
-			[]string{"connection", "network_interface"},
+			[]string{"connection", "network_interface", "cidr_exclusions"},
 		),
 		pktDropCounter: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited_drops",
 				Help: "Total number of dropped packets by connection",
 			},
-			[]string{"connection", "network_interface"},
+			[]string{"connection", "network_interface", "cidr_exclusions"},
 		),
 		tokens: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "rate_limited_tokens",
 				Help: "Available tokens. Max tokens should be equal to the packet limit, but when 0 indicates the packets are rate limited",
 			},
-			[]string{"connection", "network_interface"},
+			[]string{"connection", "network_interface", "cidr_exclusions"},
 		),
 	}
 
@@ -108,12 +115,15 @@ func boolToFloat64(b bool) float64 {
 	if b {
 		return 1.0
 	}
+
 	return 0.0
 }
 
-func fetchAndProcessMetrics(objs *rate_limiterObjects, networkInterface string, m *Metrics) {
+func fetchAndProcessMetrics(objs *rate_limiterObjects, m *Metrics, networkInterface string, cidrExclusions []string) {
 	// Create an iterator for the map.
 	iter := objs.Connections.Iterate()
+
+	cidrString := strings.Join(cidrExclusions, ",")
 
 	// Define variables to hold key and value.
 	var key PortKey
@@ -126,13 +136,13 @@ func fetchAndProcessMetrics(objs *rate_limiterObjects, networkInterface string, 
 		log.Debugf("Source: %s, Value: %+v", keyedBy, value)
 
 		// Update Prometheus gauge with the packet count for the source port
-		m.rateLimited.WithLabelValues(keyedBy, networkInterface).Set(boolToFloat64(value.RateLimited))
+		m.rateLimited.WithLabelValues(keyedBy, networkInterface, cidrString).Set(boolToFloat64(value.RateLimited))
 
 		// Update Prometheus gauge with the packet drop count for the source port
-		m.pktDropCounter.WithLabelValues(keyedBy, networkInterface).Set(float64(value.PktDropCounter))
+		m.pktDropCounter.WithLabelValues(keyedBy, networkInterface, cidrString).Set(float64(value.PktDropCounter))
 
 		// Update Prometheus gauge with the token count for the source port
-		m.tokens.WithLabelValues(keyedBy, networkInterface).Set(float64(value.Tokens))
+		m.tokens.WithLabelValues(keyedBy, networkInterface, cidrString).Set(float64(value.Tokens))
 	}
 
 	if err := iter.Err(); err != nil {
@@ -150,6 +160,16 @@ func run(networkInterface string) {
 	}
 
 	defer objs.Close()
+
+	// Add CIDR exclusions
+	cidrExclusions := []string{
+		"192.168.1.0/24",
+		// "10.0.0.0/8",
+		// Add more CIDR ranges as needed
+	}
+	if err := updateCIDRExclusions(&objs, cidrExclusions); err != nil {
+		log.Fatalf("Updating CIDR exclusions: %s", err)
+	}
 
 	iface, err := net.InterfaceByName(networkInterface)
 	if err != nil {
@@ -178,13 +198,50 @@ func run(networkInterface string) {
 	for {
 		select {
 		case <-tick:
-			go fetchAndProcessMetrics(&objs, networkInterface, m)
+			go fetchAndProcessMetrics(&objs, m, networkInterface, cidrExclusions)
 		case <-stop:
 			log.Info("Received signal, exiting..")
 
 			return
 		}
 	}
+}
+
+// Update the CIDR exclusions map in eBPF
+func updateCIDRExclusions(objs *rate_limiterObjects, cidrList []string) error {
+	for _, cidr := range cidrList {
+		ip, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR %s: %w", cidr, err)
+		}
+
+		// Extract the network address in big-endian order
+		var network uint32
+		ipBytes := ip.To4()
+		if ipBytes == nil {
+			return fmt.Errorf("only IPv4 supported, got %s", cidr)
+		}
+		network = binary.BigEndian.Uint32(ipBytes)
+
+		// Calculate prefix length
+		prefixLen, _ := ipnet.Mask.Size()
+
+		// Create the CIDR key
+		key := CIDRKey{
+			Network:   network,
+			PrefixLen: uint32(prefixLen),
+		}
+
+		value := uint32(1) // Dummy value for map
+
+		// Update the eBPF map
+		err = objs.CidrExclusions.Put(key, value)
+		if err != nil {
+			return fmt.Errorf("failed to update CIDR exclusion map: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func main() {

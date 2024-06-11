@@ -77,6 +77,19 @@ struct bpf_elf_map SEC("maps") events = {
     .max_elem = 0,
 };
 
+struct cidr_key {
+    __u32 network;  // Network part of the IP
+    __u32 prefix_len; // Prefix length
+} __attribute__((packed));
+
+// Map to store CIDR ranges for exclusion
+struct bpf_elf_map SEC("maps") cidr_exclusions = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(struct cidr_key),
+    .value_size = sizeof(__u32),
+    .max_elem = 256,
+};
+
 // Function to parse packet headers
 static __always_inline int parse_packet_headers(struct xdp_md* ctx, __u16* src_port, __u32* src_ip) {
     void* data_end = (void*)(long)ctx->data_end;
@@ -125,8 +138,27 @@ static __always_inline int parse_packet_headers(struct xdp_md* ctx, __u16* src_p
     return 1;
 }
 
-// Function to initialize a new packet state
-static __always_inline void init_state(struct packet_state* state) {
+// Check if IP is in any exclusion range
+static __always_inline _Bool is_in_exclusion_list(__u32 ip) {
+    struct cidr_key key = { 0 };
+    __u32 mask = 0;
+    __u32* value;
+
+    for (int i = 0; i <= 32; i++) {
+        key.network = ip & bpf_htonl(mask);
+        key.prefix_len = i;
+        value = bpf_map_lookup_elem(&cidr_exclusions, &key);
+        if (value) {
+            return 1;
+        }
+        mask = (mask >> 1) | 0x80000000;
+    }
+
+    return 0;
+}
+
+// Initialize a new packet state map
+static __always_inline void init_packet_state(struct packet_state* state) {
     state->tokens = PACKET_LIMIT;
     state->last_refill = bpf_ktime_get_ns();
     state->rate_limited = 0;
@@ -150,7 +182,7 @@ static __always_inline void add_tokens(struct packet_state* state, __u64 now) {
     // tokens_to_add = 50    
     __u64 tokens_to_add = (elapsed_time_ns * state->config_rate) / NS_IN_SEC;
 
-    // bpf_printk("toadd: %d", tokens_to_add);
+    bpf_printk("toadd: %d", tokens_to_add);
 
     if (tokens_to_add > 0) {
         state->tokens = (state->tokens + tokens_to_add > state->config_limit) ? state->config_limit : state->tokens + tokens_to_add;
@@ -200,14 +232,20 @@ int rate_limit(struct xdp_md* ctx) {
     struct packet_state* state;
     struct packet_state new_state;
 
+    // Check if this is a valid packet and if so set attributes
     if (!parse_packet_headers(ctx, &key.src_port, &key.src_ip)) {
+        return XDP_PASS;
+    }
+
+    // Check if IP is in exclusion list
+    if (is_in_exclusion_list(key.src_ip)) {
         return XDP_PASS;
     }
 
     state = bpf_map_lookup_elem(&connections, &key);
 
     if (!state) {
-        init_state(&new_state);
+        init_packet_state(&new_state);
         bpf_map_update_elem(&connections, &key, &new_state, BPF_ANY);
         state = bpf_map_lookup_elem(&connections, &key);
 

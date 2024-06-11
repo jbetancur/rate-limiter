@@ -60,8 +60,9 @@ type rate_limiterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type rate_limiterMapSpecs struct {
-	Connections *ebpf.MapSpec `ebpf:"connections"`
-	Events      *ebpf.MapSpec `ebpf:"events"`
+	CidrExclusions *ebpf.MapSpec `ebpf:"cidr_exclusions"`
+	Connections    *ebpf.MapSpec `ebpf:"connections"`
+	Events         *ebpf.MapSpec `ebpf:"events"`
 }
 
 // rate_limiterObjects contains all objects after they have been loaded into the kernel.
@@ -83,12 +84,14 @@ func (o *rate_limiterObjects) Close() error {
 //
 // It can be passed to loadRate_limiterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type rate_limiterMaps struct {
-	Connections *ebpf.Map `ebpf:"connections"`
-	Events      *ebpf.Map `ebpf:"events"`
+	CidrExclusions *ebpf.Map `ebpf:"cidr_exclusions"`
+	Connections    *ebpf.Map `ebpf:"connections"`
+	Events         *ebpf.Map `ebpf:"events"`
 }
 
 func (m *rate_limiterMaps) Close() error {
 	return _Rate_limiterClose(
+		m.CidrExclusions,
 		m.Connections,
 		m.Events,
 	)
