@@ -1,6 +1,6 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_LIMIT=2000 -DRATE=5
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go rate_limiter rate_limiter.c -- -DPACKET_BURST_LIMIT=10000 -DPACKETS_PER_SECOND=3200 -DPACKET_BURST_REPLENISH_SECONDS=600
 
 import (
 	"fmt"
@@ -31,13 +31,14 @@ type PortKey struct {
 }
 
 type PacketState struct {
-	Tokens          uint32
-	LastRefill      uint64
-	RateLimited     bool
-	PktDropCounter  uint64
-	ConfigLimit     uint64
-	ConfigRate      uint64
-	ActualRateLimit uint64
+	Tokens                           uint32
+	LastRefill                       uint64
+	LastBurstRefill                  uint64
+	RateLimited                      bool
+	PktDropCounter                   uint64
+	ConfigBurstLimitReplenishSeconds uint64
+	ConfigBurstLimit                 uint64
+	ConfigPacketsPerSecond           uint64
 }
 
 type Metric struct {

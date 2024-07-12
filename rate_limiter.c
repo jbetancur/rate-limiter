@@ -10,12 +10,16 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#ifndef PACKET_LIMIT
-#define PACKET_LIMIT 10000
+#ifndef PACKET_BURST_LIMIT
+#define PACKET_BURST_LIMIT 10000
 #endif
 
-#ifndef RATE
-#define RATE 5
+#ifndef PACKET_BURST_REPLENISH_SECONDS 
+#define PACKET_BURST_REPLENISH_SECONDS 600
+#endif
+
+#ifndef PACKETS_PER_SECOND
+#define PACKETS_PER_SECOND 3200
 #endif
 
 #ifndef MAX_MAP_ENTRIES
@@ -28,7 +32,7 @@
 ({                                                       \
     char ____fmt[] = fmt;                                \
     bpf_trace_printk(____fmt, sizeof(____fmt),           \
-    ##__VA_ARGS__);                     \
+    ##__VA_ARGS__);                                      \
 })
 
 struct port_key {
@@ -48,11 +52,12 @@ struct bpf_elf_map {
 struct packet_state {
     __u32 tokens;
     __u64 last_refill;
+    __u64 last_burst_refill;
     _Bool rate_limited;
     __u64 pkt_drop_counter;
-    __u64 config_limit;
-    __u64 config_rate;
-    __u64 actual_rate_limit;
+    __u64 config_packet_burst_limit;
+    __u64 config_packet_burst_replenish_seconds;
+    __u64 config_packets_per_second;
 } __attribute__((packed));
 
 struct bpf_elf_map SEC("maps") connections = {
@@ -107,6 +112,11 @@ static __always_inline int parse_packet_headers(struct xdp_md* ctx, __u16* src_p
             return 0;
         }
 
+        // Bypass rate limiting for SYN-ACK packets
+        if (tcp->syn && tcp->ack) {
+            return 0;
+        }
+
         *src_port = bpf_ntohs(tcp->source);
     }
     else if (ip->protocol == IPPROTO_UDP) {
@@ -127,43 +137,46 @@ static __always_inline int parse_packet_headers(struct xdp_md* ctx, __u16* src_p
 
 // Function to initialize a new packet state
 static __always_inline void init_state(struct packet_state* state) {
-    state->tokens = PACKET_LIMIT;
-    state->last_refill = bpf_ktime_get_ns();
+    __u64 now = bpf_ktime_get_ns();
+
+    state->tokens = PACKET_BURST_LIMIT;
+    state->last_refill = now;
+    state->last_burst_refill = now;
     state->rate_limited = 0;
-    state->config_limit = PACKET_LIMIT;
-    state->config_rate = RATE;
-    state->actual_rate_limit = PACKET_LIMIT / RATE;
+    state->config_packet_burst_limit = PACKET_BURST_LIMIT;
+    state->config_packet_burst_replenish_seconds = PACKET_BURST_REPLENISH_SECONDS;
+    state->config_packets_per_second = PACKETS_PER_SECOND;
     state->pkt_drop_counter = 0;
 }
 
 // Function to add tokens based on elapsed time
-static __always_inline void add_tokens(struct packet_state* state, __u64 now) {
-    __u64 elapsed_time_ns = now - state->last_refill;
+static __always_inline void add_tokens(struct packet_state* state) {
+    __u64 now = bpf_ktime_get_ns();
 
-    // Calculate the number of tokens to add based on the elapsed nanoseconds
-    // elapsed_time_ns (nanoseconds)
-    // state->config_rate (tokens/second)
-    // NS_IN_SEC (nanoseconds/second)
-    // For example, if elapsed_time_ns is 5000000000 nanoseconds (5 seconds) and state->config_rate is 10 tokens/second:
-    // tokens_to_add = (5000000000 * 10) / 1000000000
-    // tokens_to_add = 50000000000 / 1000000000
-    // tokens_to_add = 50    
-    __u64 tokens_to_add = (elapsed_time_ns * state->config_rate) / NS_IN_SEC;
+    // bpf_printk("LAST %d, %d", elapsed_time_ns, state->config_packet_burst_replenish_seconds * NS_IN_SEC);
+    // Check if n seconds have passed since the last refill and refill the burst
+    if ((now - state->last_burst_refill) >= state->config_packet_burst_replenish_seconds * NS_IN_SEC) {
+        state->tokens = state->config_packet_burst_limit;
+        state->last_burst_refill = now;
 
-    // bpf_printk("toadd: %d", tokens_to_add);
+        return;
+    }
+
+    __u64 tokens_to_add = ((now - state->last_refill) * state->config_packets_per_second) / NS_IN_SEC;
 
     if (tokens_to_add > 0) {
-        state->tokens = (state->tokens + tokens_to_add > state->config_limit) ? state->config_limit : state->tokens + tokens_to_add;
-        state->last_refill = now; // Update last refill to the current time
+        state->tokens = (state->tokens + tokens_to_add > state->config_packet_burst_limit) ? state->config_packet_burst_limit : state->tokens + tokens_to_add;
+        state->last_refill = now;
     }
+
+    return;
 }
 
 static __always_inline int handle_rate_limit(struct xdp_md* ctx, struct packet_state* state, struct port_key* key) {
     struct metrics metric = { 0 };
-    __u64 now = bpf_ktime_get_ns();
 
     // Add tokens to the bucket
-    add_tokens(state, now);
+    add_tokens(state);
 
     // Check if there are enough tokens to pass the packet
     if (state->tokens > 0) {
